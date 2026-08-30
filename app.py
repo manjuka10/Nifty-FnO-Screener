@@ -2,69 +2,83 @@ import streamlit as st
 import pandas as pd
 import requests
 import feedparser
-import yfinance as yf
 import html
 import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+from urllib.parse import quote_plus
 
-st.set_page_config(page_title="Indian Market News", page_icon="📰", layout="wide")
-st.title("📰 Indian Stock Market News Intelligence")
-st.caption("Major Indian market, stock, sector and regulatory news • Auto-refresh every 5 minutes")
+st.set_page_config(page_title="Indian & Global Stock Market News", page_icon="📰", layout="wide")
 
 IST = ZoneInfo("Asia/Kolkata")
-HEADERS = {"User-Agent": "Mozilla/5.0 Indian Market News Dashboard"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; IndianMarketNews/1.0)"}
 
-NEWS_FEEDS = {
-    "Indian Market": "https://news.google.com/rss/search?q=India+stock+market+Nifty+Sensex&hl=en-IN&gl=IN&ceid=IN:en",
-    "Indian Stocks": "https://news.google.com/rss/search?q=Indian+stocks+shares+companies&hl=en-IN&gl=IN&ceid=IN:en",
-    "Corporate": "https://news.google.com/rss/search?q=India+corporate+earnings+orders+acquisition+merger&hl=en-IN&gl=IN&ceid=IN:en",
-    "SEBI RBI": "https://news.google.com/rss/search?q=SEBI+RBI+India+markets&hl=en-IN&gl=IN&ceid=IN:en",
-    "Government": "https://news.google.com/rss/search?q=India+government+policy+markets+stocks&hl=en-IN&gl=IN&ceid=IN:en",
-    "Sectors": "https://news.google.com/rss/search?q=India+banking+IT+pharma+auto+energy+defence+stocks&hl=en-IN&gl=IN&ceid=IN:en",
-    "Economy": "https://news.google.com/rss/search?q=India+inflation+GDP+rupee+FII+DII+oil+markets&hl=en-IN&gl=IN&ceid=IN:en",
-    "Global": "https://news.google.com/rss/search?q=India+stocks+Fed+oil+China+global+markets&hl=en-IN&gl=IN&ceid=IN:en",
-    "NSE Corporate": "https://www.nseindia.com/rss-feed/corporate-announcements",
-}
+st.title("📰 Indian & Global Stock Market News")
+st.caption("Major & important market-moving news • Indian + global markets • Automatic refresh every 5 minutes")
+
+# Broad coverage. No user-facing filters are used.
+SEARCHES = [
+    ("Indian Market", "India stock market Nifty Sensex shares"),
+    ("Indian Companies", "Indian listed companies stocks earnings results order acquisition"),
+    ("Corporate Actions", "India listed company dividend buyback merger stake sale fundraising"),
+    ("SEBI RBI", "SEBI RBI India stock market regulation circular"),
+    ("India Economy", "India inflation GDP rupee FII DII interest rates economy"),
+    ("Indian Sectors", "India banking IT pharma auto energy defence metals stocks"),
+    ("US Markets", "US stocks S&P 500 Nasdaq Dow Jones market"),
+    ("Global Markets", "global stock markets Europe Asia China Japan"),
+    ("Central Banks", "Federal Reserve ECB BOJ interest rates markets"),
+    ("Commodities", "crude oil gold commodities markets"),
+    ("Currencies Bonds", "dollar rupee treasury yields bonds markets"),
+    ("Global Macro", "global economy inflation recession tariffs trade markets"),
+    ("Geopolitics", "geopolitics sanctions war tariffs markets stocks"),
+]
+
+HIGH_TERMS = [
+    "fraud","default","bankruptcy","insolvency","major order","large order",
+    "order win","acquisition","merger","takeover","ceo","resignation","regulatory",
+    "sebi","rbi","penalty","fine","investigation","downgrade","profit warning",
+    "guidance cut","fund raising","fundraise","buyback","dividend","debt",
+    "shutdown","approval","license","ban","earnings","results","stake sale",
+    "promoter stake","ipo","delisting","record profit","profit falls","profit rises",
+    "revenue falls","revenue rises","target price","pledge","lawsuit"
+]
+MARKET_TERMS = [
+    "nifty","sensex","s&p 500","nasdaq","dow jones","federal reserve","fed","ecb","boj",
+    "repo rate","interest rate","rate cut","rate hike","inflation","gdp","fii","dii",
+    "rupee","crude","oil","gold","treasury yield","bond yield","tariff","trade war",
+    "recession","economic growth","geopolitical","war","sanctions","china","japan","europe",
+    "global markets","us stocks"
+]
+IMPORTANT_TERMS = [
+    "order","contract","earnings","results","profit","revenue","sales","investment",
+    "expansion","launch","approval","stake","partnership","forecast","outlook","guidance",
+    "brokerage","rating","capacity"
+]
 
 SECTOR_WORDS = {
-    "Banking": ["bank", "banking", "nbfc", "lending", "credit", "loan"],
-    "IT": ["it services", "software", "technology", "tcs", "infosys", "wipro", "hcltech", "tech mahindra"],
-    "Pharma": ["pharma", "drug", "pharmaceutical", "healthcare", "hospital"],
-    "Auto": ["auto", "automobile", "vehicle", "cars", "two-wheeler"],
-    "Energy": ["oil", "gas", "energy", "refinery", "power", "renewable"],
-    "Defence": ["defence", "defense", "military", "missile", "hal", "bel"],
-    "Metals": ["steel", "aluminium", "metal", "copper", "mining"],
-    "FMCG": ["fmcg", "consumer", "foods", "beverages"],
-    "Telecom": ["telecom", "mobile", "5g", "jio", "airtel"],
-    "Realty": ["real estate", "realty", "property", "housing"],
-    "Infrastructure": ["infra", "infrastructure", "roads", "construction", "cement"],
-    "Financial Services": ["insurance", "finance", "financial services", "mutual fund", "amc"],
-    "Chemicals": ["chemical", "specialty chemicals"],
+    "Banking": ["bank","banking","nbfc","loan","credit"],
+    "IT": ["tcs","infosys","wipro","hcltech","software","technology"],
+    "Pharma": ["pharma","drug","pharmaceutical","healthcare","hospital"],
+    "Auto": ["auto","automobile","vehicle","cars","two-wheeler"],
+    "Energy": ["oil","gas","energy","refinery","power","renewable"],
+    "Defence": ["defence","defense","military","missile","hal","bel"],
+    "Metals": ["steel","aluminium","metal","copper","mining"],
+    "FMCG": ["fmcg","consumer","foods","beverages"],
+    "Telecom": ["telecom","mobile","5g","airtel","jio"],
+    "Realty": ["real estate","realty","property","housing"],
+    "Infrastructure": ["infra","infrastructure","roads","construction","cement"],
+    "Financial Services": ["insurance","finance","mutual fund","amc"],
+    "Chemicals": ["chemical","specialty chemicals"],
 }
 
-HIGH_IMPACT_WORDS = [
-    "fraud", "default", "bankruptcy", "insolvency", "major order", "large order",
-    "order win", "acquisition", "merger", "takeover", "ceo", "md", "resignation",
-    "resign", "regulatory action", "regulatory", "sebi", "rbi", "penalty", "fine",
-    "investigation", "rating downgrade", "credit downgrade", "profit warning",
-    "guidance cut", "fund raising", "fundraise", "buyback", "dividend", "debt",
-    "plant shutdown", "shutdown", "approval", "license", "ban", "earnings",
-    "results", "stake sale", "promoter stake", "ipo", "delisting",
-]
-
-MARKET_WORDS = [
-    "nifty", "sensex", "rbi", "sebi", "budget", "inflation", "gdp", "fii", "dii",
-    "rupee", "crude", "oil", "interest rate", "repo rate", "tariff", "fed",
-    "trade war", "government", "tax", "india market",
-]
 
 def clean_text(value):
     value = html.unescape(str(value or ""))
     value = re.sub(r"<[^>]+>", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
-def get_published_time(entry):
+
+def published_time(entry):
     for field in ("published_parsed", "updated_parsed"):
         parsed = getattr(entry, field, None)
         if parsed:
@@ -74,227 +88,155 @@ def get_published_time(entry):
                 pass
     return None
 
-def classify_news(text):
-    text_lower = text.lower()
-    sectors = []
-    for sector, words in SECTOR_WORDS.items():
-        if any(word in text_lower for word in words):
-            sectors.append(sector)
 
-    if any(word in text_lower for word in HIGH_IMPACT_WORDS + MARKET_WORDS):
-        priority = "HIGH"
-    elif sectors:
-        priority = "IMPORTANT"
-    else:
-        priority = "ROUTINE"
+def priority(text):
+    t = text.lower()
+    if any(x in t for x in HIGH_TERMS) or any(x in t for x in MARKET_TERMS):
+        return "HIGH"
+    if any(x in t for x in IMPORTANT_TERMS):
+        return "IMPORTANT"
+    return "ROUTINE"
 
-    return priority, ", ".join(dict.fromkeys(sectors)[:3]) if sectors else "Market"
 
-def read_feed(source_name, url):
-    results = []
+def sector(text):
+    t = text.lower()
+    found = [name for name, words in SECTOR_WORDS.items() if any(w in t for w in words)]
+    return ", ".join(found[:3]) if found else "Market"
+
+
+def google_rss(query):
+    return "https://news.google.com/rss/search?q=" + quote_plus(query) + "&hl=en-IN&gl=IN&ceid=IN:en"
+
+
+def read_feed(label, url):
+    rows = []
     try:
-        response = requests.get(url, headers=HEADERS, timeout=20)
-        response.raise_for_status()
-        feed = feedparser.parse(response.content)
-
-        for entry in feed.entries[:100]:
-            headline = clean_text(entry.get("title", ""))
-            link = entry.get("link", "")
-            published = get_published_time(entry)
-            summary = clean_text(entry.get("summary", entry.get("description", "")))
-
-            if not headline or not link or published is None:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        feed = feedparser.parse(r.content)
+        for e in feed.entries[:100]:
+            title = clean_text(e.get("title", ""))
+            link = e.get("link", "")
+            summary = clean_text(e.get("summary", e.get("description", "")))
+            published = published_time(e)
+            if not title or not link or published is None:
                 continue
-
-            priority, sector = classify_news(headline + " " + summary)
-
-            source = source_name
-            try:
-                source_value = entry.get("source")
-                if isinstance(source_value, dict):
-                    source = clean_text(source_value.get("title", source_name))
-            except Exception:
-                pass
-
-            results.append({
+            text = title + " " + summary
+            rows.append({
                 "Published": published,
-                "Headline": headline,
+                "Headline": title,
                 "Summary": summary,
-                "Source": source,
-                "Priority": priority,
-                "Sector": sector,
+                "Source": label,
+                "Priority": priority(text),
+                "Sector": sector(text),
                 "Link": link,
             })
     except Exception:
         pass
+    return rows
 
-    return results
+
+def dedupe(df):
+    if df.empty:
+        return df
+    df = df.copy()
+    df["Key"] = (df["Headline"].str.lower()
+                 .str.replace(r"[^a-z0-9 ]", "", regex=True)
+                 .str.replace(r"\s+", " ", regex=True)
+                 .str.strip())
+    return (df.sort_values("Published", ascending=False)
+              .drop_duplicates("Key")
+              .drop(columns="Key")
+              .reset_index(drop=True))
+
 
 @st.cache_data(ttl=240, show_spinner=False)
 def load_news():
     rows = []
-    for source, url in NEWS_FEEDS.items():
-        rows.extend(read_feed(source, url))
+    for label, query in SEARCHES:
+        rows.extend(read_feed(label, google_rss(query)))
+
+    # NSE's public RSS page documents corporate information feeds and real-time-style
+    # publication of announcements. Keep the official NSE announcements page in the
+    # source set as a direct public source as well.
+    rows.extend(read_feed(
+        "NSE Corporate Announcements",
+        "https://www.nseindia.com/companies-listing/corporate-filings-application"
+    ))
 
     if not rows:
-        return pd.DataFrame(columns=["Published", "Headline", "Summary", "Source", "Priority", "Sector", "Link"])
+        return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-    df["DuplicateKey"] = (
-        df["Headline"].str.lower()
-        .str.replace(r"[^a-z0-9 ]", "", regex=True)
-        .str.replace(r"\s+", " ", regex=True)
-        .str.strip()
-    )
+    df = dedupe(pd.DataFrame(rows))
+    return df[df["Priority"].isin(["HIGH", "IMPORTANT"])].reset_index(drop=True)
 
-    return (
-        df.sort_values("Published", ascending=False)
-        .drop_duplicates("DuplicateKey")
-        .drop(columns="DuplicateKey")
-        .reset_index(drop=True)
-    )
 
 @st.cache_data(ttl=240, show_spinner=False)
-def detect_sudden_moves():
-    symbols = [
-        "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "BHARTIARTL",
-        "ITC", "LT", "SBIN", "AXISBANK", "KOTAKBANK", "M&M", "MARUTI",
-        "SUNPHARMA", "TATAMOTORS", "TATASTEEL", "NTPC", "POWERGRID", "BEL", "HAL"
+def search_news(term):
+    rows = []
+    queries = [
+        f'"{term}" India stock company',
+        f'"{term}" NSE BSE earnings results order',
+        f'"{term}" latest market news',
+        f'"{term}" acquisition merger investment stake',
     ]
+    for q in queries:
+        rows.extend(read_feed("Stock Search", google_rss(q)))
+    if not rows:
+        return pd.DataFrame()
+    df = dedupe(pd.DataFrame(rows))
+    return df[df["Priority"].isin(["HIGH", "IMPORTANT"])].reset_index(drop=True)
 
-    results = []
 
-    try:
-        data = yf.download(
-            [symbol + ".NS" for symbol in symbols],
-            period="10d",
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            group_by="ticker",
-            threads=True,
-        )
-
-        for symbol in symbols:
-            try:
-                close = data[symbol + ".NS"]["Close"].dropna()
-                if len(close) < 2:
-                    continue
-
-                previous = float(close.iloc[-2])
-                latest = float(close.iloc[-1])
-                move = (latest / previous - 1) * 100
-
-                if abs(move) >= 3:
-                    results.append({"Stock": symbol, "Move %": round(move, 2)})
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    if not results:
-        return pd.DataFrame(columns=["Stock", "Move %"])
-
-    return (
-        pd.DataFrame(results)
-        .sort_values("Move %", key=lambda x: x.abs(), ascending=False)
-        .reset_index(drop=True)
-    )
-
-# 5-minute automatic refresh
+# 5-minute automatic refresh.
 try:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=300000, key="market_news_refresh")
 except Exception:
-    st.warning("Auto-refresh package is unavailable. Check requirements.txt.")
+    st.warning("Auto-refresh is unavailable. Check requirements.txt.")
 
-news = load_news()
-moves = detect_sudden_moves()
-now = datetime.now(IST)
+st.caption("Last updated: " + datetime.now(IST).strftime("%d-%m-%Y %I:%M:%S %p IST") + " • Auto-refresh every 5 minutes")
 
-c1, c2, c3 = st.columns(3)
-c1.metric("News collected", len(news))
-important_count = int(news["Priority"].isin(["HIGH", "IMPORTANT"]).sum()) if not news.empty else 0
-c2.metric("High / Important", important_count)
-c3.metric("Last update", now.strftime("%I:%M:%S %p"))
-
-st.caption(now.strftime("%d-%m-%Y") + " IST • Automatic refresh every 5 minutes")
-
-st.subheader("🚨 Sudden Stock Moves")
-
-if moves.empty:
-    st.info("No ≥3% daily move detected in the monitored large-cap stocks.")
-else:
-    st.dataframe(moves, use_container_width=True, hide_index=True)
-    st.caption(
-        "A sudden price move is NOT automatically assigned a reason. "
-        "A reason is shown only when supporting news is available."
-    )
-
-st.subheader("🔎 Major & Important News")
-
-f1, f2, f3 = st.columns(3)
-
-with f1:
-    priority_filter = st.selectbox("Priority", ["HIGH", "IMPORTANT", "ALL"])
-
-with f2:
-    sectors = ["ALL"]
-    if not news.empty:
-        sector_set = set()
-        for value in news["Sector"].dropna():
-            sector_set.update(str(value).split(", "))
-        sectors += sorted(x for x in sector_set if x)
-    sector_filter = st.selectbox("Sector", sectors)
-
-with f3:
-    search = st.text_input("Search stock / company / topic")
-
-filtered = news.copy()
-
-if priority_filter != "ALL":
-    filtered = filtered[filtered["Priority"] == priority_filter]
-
-if sector_filter != "ALL":
-    filtered = filtered[
-        filtered["Sector"].str.contains(sector_filter, case=False, na=False)
-    ]
-
-if search.strip():
-    q = search.strip().lower()
-    filtered = filtered[
-        filtered["Headline"].str.lower().str.contains(q, na=False)
-        | filtered["Summary"].str.lower().str.contains(q, na=False)
-    ]
-
-for _, row in filtered.head(60).iterrows():
-    icon = "🔴" if row["Priority"] == "HIGH" else "🟠"
-
-    st.markdown(
-        f"**{icon} {row['Priority']} | {row['Sector']}**  \n"
-        f"**{row['Published'].strftime('%d-%m-%Y %I:%M:%S %p')} IST**  \n"
-        f"### {row['Headline']}"
-    )
-
-    if row["Summary"]:
-        st.write(row["Summary"][:1500])
-
-    st.caption("Source: " + str(row["Source"]))
-    st.link_button("📖 Read original / full news", row["Link"])
-    st.divider()
-
-st.subheader("⚠️ Coverage note")
-st.info(
-    "This app is designed for maximum practical coverage using public feeds and "
-    "primary-source announcements. Some publishers require paid APIs, authentication "
-    "or restrict automated access, so no public-feed system can guarantee literally "
-    "every story. The app does not invent a reason for a stock move when supporting "
-    "news cannot be found."
+# ONLY user-facing control: search.
+st.subheader("🔎 Search Stock / Company / Sector")
+search = st.text_input(
+    "Search",
+    placeholder="Example: Reliance, Infosys, HDFC Bank, Tata Motors, pharma, defence",
+    label_visibility="collapsed",
 )
 
+if search.strip():
+    news = search_news(search.strip())
+    st.subheader(f"📰 News related to {search.strip()}")
+else:
+    news = load_news()
+    st.subheader("📰 Major & Important News")
+
+if news.empty:
+    st.info("No major or important news found right now.")
+else:
+    for _, row in news.head(100).iterrows():
+        icon = "🔴" if row["Priority"] == "HIGH" else "🟠"
+        st.markdown(f"**{icon} {row['Priority']} • {row['Sector']}**")
+        st.markdown("**" + row["Published"].strftime("%d-%m-%Y %I:%M:%S %p IST") + "**")
+        st.markdown(f"#### {row['Headline']}")
+        if row["Summary"]:
+            st.write(row["Summary"][:1800])
+        st.caption("Source/feed: " + str(row["Source"]))
+        st.link_button("📖 Read original / full article", row["Link"])
+        st.divider()
+
 st.download_button(
-    "⬇️ Download News CSV",
-    filtered.to_csv(index=False).encode("utf-8"),
-    "indian_market_news.csv",
+    "⬇️ Download Current News",
+    news.to_csv(index=False).encode("utf-8"),
+    "market_news.csv",
     "text/csv",
+)
+
+st.info(
+    "Coverage is designed to surface major and important developments across Indian stocks, "
+    "sectors, SEBI/RBI, corporate actions, the Indian economy and major global markets. "
+    "No public-feed app can guarantee every article because some publishers and regulatory "
+    "systems require direct or paid APIs. A headline is not treated as the reason for a "
+    "stock move unless the source itself provides that explanation."
 )
