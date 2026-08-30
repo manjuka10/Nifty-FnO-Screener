@@ -1,242 +1,486 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import yfinance as yf
 import requests
-import feedparser
-import html
-import re
-from datetime import datetime, timezone
+import csv
+import io
+from datetime import datetime
 from zoneinfo import ZoneInfo
-from urllib.parse import quote_plus
 
-st.set_page_config(page_title="Indian & Global Stock Market News", page_icon="📰", layout="wide")
+st.set_page_config(
+    page_title="My Stock Screener",
+    page_icon="📊",
+    layout="wide"
+)
 
-IST = ZoneInfo("Asia/Kolkata")
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; IndianMarketNews/1.0)"}
+st.title("📊 My Stock Screener")
+st.subheader("Nifty 100 Technical Screener")
+st.caption(
+    "Latest available intraday price is used for calculations. "
+    "Yahoo Finance data may be delayed during market hours."
+)
 
-st.title("📰 Indian & Global Stock Market News")
-st.caption("Major & important market-moving news • Indian + global markets • Automatic refresh every 5 minutes")
-
-# Broad coverage. No user-facing filters are used.
-SEARCHES = [
-    ("Indian Market", "India stock market Nifty Sensex shares"),
-    ("Indian Companies", "Indian listed companies stocks earnings results order acquisition"),
-    ("Corporate Actions", "India listed company dividend buyback merger stake sale fundraising"),
-    ("SEBI RBI", "SEBI RBI India stock market regulation circular"),
-    ("India Economy", "India inflation GDP rupee FII DII interest rates economy"),
-    ("Indian Sectors", "India banking IT pharma auto energy defence metals stocks"),
-    ("US Markets", "US stocks S&P 500 Nasdaq Dow Jones market"),
-    ("Global Markets", "global stock markets Europe Asia China Japan"),
-    ("Central Banks", "Federal Reserve ECB BOJ interest rates markets"),
-    ("Commodities", "crude oil gold commodities markets"),
-    ("Currencies Bonds", "dollar rupee treasury yields bonds markets"),
-    ("Global Macro", "global economy inflation recession tariffs trade markets"),
-    ("Geopolitics", "geopolitics sanctions war tariffs markets stocks"),
-]
-
-HIGH_TERMS = [
-    "fraud","default","bankruptcy","insolvency","major order","large order",
-    "order win","acquisition","merger","takeover","ceo","resignation","regulatory",
-    "sebi","rbi","penalty","fine","investigation","downgrade","profit warning",
-    "guidance cut","fund raising","fundraise","buyback","dividend","debt",
-    "shutdown","approval","license","ban","earnings","results","stake sale",
-    "promoter stake","ipo","delisting","record profit","profit falls","profit rises",
-    "revenue falls","revenue rises","target price","pledge","lawsuit"
-]
-MARKET_TERMS = [
-    "nifty","sensex","s&p 500","nasdaq","dow jones","federal reserve","fed","ecb","boj",
-    "repo rate","interest rate","rate cut","rate hike","inflation","gdp","fii","dii",
-    "rupee","crude","oil","gold","treasury yield","bond yield","tariff","trade war",
-    "recession","economic growth","geopolitical","war","sanctions","china","japan","europe",
-    "global markets","us stocks"
-]
-IMPORTANT_TERMS = [
-    "order","contract","earnings","results","profit","revenue","sales","investment",
-    "expansion","launch","approval","stake","partnership","forecast","outlook","guidance",
-    "brokerage","rating","capacity"
-]
-
-SECTOR_WORDS = {
-    "Banking": ["bank","banking","nbfc","loan","credit"],
-    "IT": ["tcs","infosys","wipro","hcltech","software","technology"],
-    "Pharma": ["pharma","drug","pharmaceutical","healthcare","hospital"],
-    "Auto": ["auto","automobile","vehicle","cars","two-wheeler"],
-    "Energy": ["oil","gas","energy","refinery","power","renewable"],
-    "Defence": ["defence","defense","military","missile","hal","bel"],
-    "Metals": ["steel","aluminium","metal","copper","mining"],
-    "FMCG": ["fmcg","consumer","foods","beverages"],
-    "Telecom": ["telecom","mobile","5g","airtel","jio"],
-    "Realty": ["real estate","realty","property","housing"],
-    "Infrastructure": ["infra","infrastructure","roads","construction","cement"],
-    "Financial Services": ["insurance","finance","mutual fund","amc"],
-    "Chemicals": ["chemical","specialty chemicals"],
-}
+NIFTY100_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv"
 
 
-def clean_text(value):
-    value = html.unescape(str(value or ""))
-    value = re.sub(r"<[^>]+>", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
+@st.cache_data(ttl=86400)
+def get_nifty100_list():
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": "text/csv,application/csv,text/plain,*/*",
+        "Referer": "https://www.niftyindices.com/"
+    }
+
+    response = requests.get(
+        NIFTY100_URL,
+        headers=headers,
+        timeout=20
+    )
+    response.raise_for_status()
+
+    text = response.content.decode(
+        "utf-8-sig",
+        errors="replace"
+    )
+    rows = list(csv.reader(io.StringIO(text)))
+
+    if len(rows) < 2:
+        raise ValueError("Nifty 100 CSV returned no data.")
+
+    header = [str(x).strip() for x in rows[0]]
+    symbol_index = None
+
+    for i, col in enumerate(header):
+        if col.lower() == "symbol":
+            symbol_index = i
+            break
+
+    if symbol_index is None:
+        raise ValueError("Symbol column not found in Nifty 100 CSV.")
+
+    symbols = []
+    for row in rows[1:]:
+        if len(row) > symbol_index:
+            symbol = row[symbol_index].strip()
+            if symbol:
+                symbols.append(symbol)
+
+    symbols = list(dict.fromkeys(symbols))
+
+    if len(symbols) < 80:
+        raise ValueError(
+            f"Only {len(symbols)} Nifty 100 stocks were found."
+        )
+
+    return symbols
 
 
-def published_time(entry):
-    for field in ("published_parsed", "updated_parsed"):
-        parsed = getattr(entry, field, None)
-        if parsed:
-            try:
-                return datetime(*parsed[:6], tzinfo=timezone.utc).astimezone(IST)
-            except Exception:
-                pass
-    return None
+@st.cache_data(ttl=300)
+def download_stock_data(symbols):
+    tickers = [symbol + ".NS" for symbol in symbols]
+
+    daily_data = yf.download(
+        tickers=tickers,
+        period="2y",
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        group_by="ticker",
+        threads=True
+    )
+
+    intraday_data = yf.download(
+        tickers=tickers,
+        period="1d",
+        interval="5m",
+        auto_adjust=False,
+        progress=False,
+        group_by="ticker",
+        threads=True
+    )
+
+    return daily_data, intraday_data
 
 
-def priority(text):
-    t = text.lower()
-    if any(x in t for x in HIGH_TERMS) or any(x in t for x in MARKET_TERMS):
-        return "HIGH"
-    if any(x in t for x in IMPORTANT_TERMS):
-        return "IMPORTANT"
-    return "ROUTINE"
+def get_ticker_close(data, ticker):
+    if data is None or data.empty:
+        return pd.Series(dtype="float64")
 
-
-def sector(text):
-    t = text.lower()
-    found = [name for name, words in SECTOR_WORDS.items() if any(w in t for w in words)]
-    return ", ".join(found[:3]) if found else "Market"
-
-
-def google_rss(query):
-    return "https://news.google.com/rss/search?q=" + quote_plus(query) + "&hl=en-IN&gl=IN&ceid=IN:en"
-
-
-def read_feed(label, url):
-    rows = []
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        feed = feedparser.parse(r.content)
-        for e in feed.entries[:100]:
-            title = clean_text(e.get("title", ""))
-            link = e.get("link", "")
-            summary = clean_text(e.get("summary", e.get("description", "")))
-            published = published_time(e)
-            if not title or not link or published is None:
-                continue
-            text = title + " " + summary
-            rows.append({
-                "Published": published,
-                "Headline": title,
-                "Summary": summary,
-                "Source": label,
-                "Priority": priority(text),
-                "Sector": sector(text),
-                "Link": link,
-            })
+        if isinstance(data.columns, pd.MultiIndex):
+            level0 = data.columns.get_level_values(0)
+            level1 = data.columns.get_level_values(1)
+
+            if ticker in level0:
+                temp = data[ticker].copy()
+                if "Close" in temp.columns:
+                    return pd.to_numeric(
+                        temp["Close"], errors="coerce"
+                    ).dropna()
+
+            if ticker in level1:
+                temp = data.xs(
+                    ticker, axis=1, level=1
+                )
+                if "Close" in temp.columns:
+                    return pd.to_numeric(
+                        temp["Close"], errors="coerce"
+                    ).dropna()
+
+        elif "Close" in data.columns:
+            return pd.to_numeric(
+                data["Close"], errors="coerce"
+            ).dropna()
+
     except Exception:
         pass
-    return rows
+
+    return pd.Series(dtype="float64")
 
 
-def dedupe(df):
-    if df.empty:
-        return df
-    df = df.copy()
-    df["Key"] = (df["Headline"].str.lower()
-                 .str.replace(r"[^a-z0-9 ]", "", regex=True)
-                 .str.replace(r"\s+", " ", regex=True)
-                 .str.strip())
-    return (df.sort_values("Published", ascending=False)
-              .drop_duplicates("Key")
-              .drop(columns="Key")
-              .reset_index(drop=True))
+def get_index_date(index_value):
+    try:
+        timestamp = pd.Timestamp(index_value)
+
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_convert("Asia/Kolkata")
+
+        return timestamp.date()
+    except Exception:
+        return None
 
 
-@st.cache_data(ttl=240, show_spinner=False)
-def load_news():
-    rows = []
-    for label, query in SEARCHES:
-        rows.extend(read_feed(label, google_rss(query)))
+def calculate_stock_data(symbol, daily_data, intraday_data):
+    ticker = symbol + ".NS"
 
-    # NSE's public RSS page documents corporate information feeds and real-time-style
-    # publication of announcements. Keep the official NSE announcements page in the
-    # source set as a direct public source as well.
-    rows.extend(read_feed(
-        "NSE Corporate Announcements",
-        "https://www.nseindia.com/companies-listing/corporate-filings-application"
-    ))
+    try:
+        daily_close = get_ticker_close(
+            daily_data, ticker
+        )
+        intraday_close = get_ticker_close(
+            intraday_data, ticker
+        )
 
-    if not rows:
-        return pd.DataFrame()
+        if len(daily_close) < 220:
+            return None, "insufficient historical data"
 
-    df = dedupe(pd.DataFrame(rows))
-    return df[df["Priority"].isin(["HIGH", "IMPORTANT"])].reset_index(drop=True)
+        if len(intraday_close) == 0:
+            return None, "intraday data unavailable"
+
+        live_price = float(intraday_close.iloc[-1])
+
+        if not np.isfinite(live_price) or live_price <= 0:
+            return None, "invalid intraday price"
+
+        ist = ZoneInfo("Asia/Kolkata")
+        today = datetime.now(ist).date()
+
+        historical_close = daily_close.copy()
+        last_daily_date = get_index_date(
+            historical_close.index[-1]
+        )
+
+        # Remove today's incomplete daily candle.
+        if last_daily_date == today:
+            historical_close = historical_close.iloc[:-1]
+
+        if len(historical_close) < 220:
+            return None, "not enough completed daily history"
+
+        # Previous completed trading day's close.
+        previous_close = float(historical_close.iloc[-1])
+
+        if previous_close <= 0:
+            return None, "invalid previous closing price"
+
+        # Current-day return.
+        one_day_return = (
+            live_price / previous_close - 1
+        ) * 100
+
+        # Current price versus close from 5 completed sessions earlier.
+        one_week_base = float(historical_close.iloc[-6])
+        one_week_return = (
+            live_price / one_week_base - 1
+        ) * 100
+
+        # Current price versus close from about 21 sessions earlier.
+        one_month_base = float(historical_close.iloc[-22])
+        one_month_return = (
+            live_price / one_month_base - 1
+        ) * 100
+
+        # Add latest price so EMA calculations incorporate it.
+        calc_close = pd.concat([
+            historical_close,
+            pd.Series(
+                [live_price],
+                index=[pd.Timestamp.now()]
+            )
+        ])
+
+        ema21 = float(
+            calc_close.ewm(
+                span=21,
+                adjust=False
+            ).mean().iloc[-1]
+        )
+
+        ema50 = float(
+            calc_close.ewm(
+                span=50,
+                adjust=False
+            ).mean().iloc[-1]
+        )
+
+        ema200 = float(
+            calc_close.ewm(
+                span=200,
+                adjust=False
+            ).mean().iloc[-1]
+        )
+
+        last_252 = calc_close.tail(252)
+        week52_high = float(last_252.max())
+        week52_low = float(last_252.min())
+
+        from_52w_high = (
+            live_price / week52_high - 1
+        ) * 100
+
+        from_52w_low = (
+            live_price / week52_low - 1
+        ) * 100
+
+        from_21_ema = (
+            live_price / ema21 - 1
+        ) * 100
+
+        if (
+            live_price > ema21
+            and ema21 > ema50
+            and ema50 > ema200
+        ):
+            trend = "Bullish"
+        elif (
+            live_price < ema21
+            and ema21 < ema50
+            and ema50 < ema200
+        ):
+            trend = "Bearish"
+        else:
+            trend = "Neutral"
+
+        result = {
+            "Stock": symbol,
+            "Price": live_price,
+            "1D Return %": one_day_return,
+            "1W Return %": one_week_return,
+            "1M Return %": one_month_return,
+            "21 EMA": ema21,
+            "50 EMA": ema50,
+            "200 EMA": ema200,
+            "52W High": week52_high,
+            "52W Low": week52_low,
+            "From 52W High %": from_52w_high,
+            "From 52W Low %": from_52w_low,
+            "From 21 EMA %": from_21_ema,
+            "Trend": trend
+        }
+
+        return result, None
+
+    except Exception as e:
+        return None, str(e)
 
 
-@st.cache_data(ttl=240, show_spinner=False)
-def search_news(term):
-    rows = []
-    queries = [
-        f'"{term}" India stock company',
-        f'"{term}" NSE BSE earnings results order',
-        f'"{term}" latest market news',
-        f'"{term}" acquisition merger investment stake',
+def colour_trend(value):
+    if value == "Bullish":
+        return (
+            "background-color: #198754;"
+            "color: white;"
+            "font-weight: bold;"
+        )
+    if value == "Neutral":
+        return (
+            "background-color: #F5B642;"
+            "color: black;"
+            "font-weight: bold;"
+        )
+    if value == "Bearish":
+        return (
+            "background-color: #DC3545;"
+            "color: white;"
+            "font-weight: bold;"
+        )
+    return ""
+
+
+if st.button("🔍 Scan Nifty 100"):
+    try:
+        symbols = get_nifty100_list()
+        st.info(
+            f"Current Nifty 100 list: {len(symbols)} stocks"
+        )
+    except Exception as e:
+        st.error("Unable to get the current Nifty 100 list.")
+        st.error(str(e))
+        st.stop()
+
+    with st.spinner(
+        "Downloading daily and latest intraday data..."
+    ):
+        try:
+            daily_data, intraday_data = download_stock_data(
+                symbols
+            )
+        except Exception as e:
+            st.error("Unable to download stock data.")
+            st.error(str(e))
+            st.stop()
+
+    results = []
+    unavailable = []
+    progress = st.progress(0)
+    total = len(symbols)
+
+    for i, symbol in enumerate(symbols):
+        result, reason = calculate_stock_data(
+            symbol,
+            daily_data,
+            intraday_data
+        )
+
+        if result is not None:
+            results.append(result)
+        else:
+            unavailable.append(
+                f"{symbol} ({reason})"
+            )
+
+        progress.progress(
+            int(((i + 1) / total) * 100)
+        )
+
+    progress.empty()
+
+    if not results:
+        st.error("No stock data could be calculated.")
+        st.stop()
+
+    columns = [
+        "Stock",
+        "Price",
+        "1D Return %",
+        "1W Return %",
+        "1M Return %",
+        "21 EMA",
+        "50 EMA",
+        "200 EMA",
+        "52W High",
+        "52W Low",
+        "From 52W High %",
+        "From 52W Low %",
+        "From 21 EMA %",
+        "Trend"
     ]
-    for q in queries:
-        rows.extend(read_feed("Stock Search", google_rss(q)))
-    if not rows:
-        return pd.DataFrame()
-    df = dedupe(pd.DataFrame(rows))
-    return df[df["Priority"].isin(["HIGH", "IMPORTANT"])].reset_index(drop=True)
 
+    df = pd.DataFrame(results)
+    df = df[columns]
 
-# 5-minute automatic refresh.
-try:
-    from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=300000, key="market_news_refresh")
-except Exception:
-    st.warning("Auto-refresh is unavailable. Check requirements.txt.")
+    df = df.sort_values(
+        by="From 21 EMA %",
+        ascending=False
+    ).reset_index(drop=True)
 
-st.caption("Last updated: " + datetime.now(IST).strftime("%d-%m-%Y %I:%M:%S %p IST") + " • Auto-refresh every 5 minutes")
+    ist = ZoneInfo("Asia/Kolkata")
+    updated_time = datetime.now(ist).strftime(
+        "%d-%m-%Y %I:%M:%S %p IST"
+    )
 
-# ONLY user-facing control: search.
-st.subheader("🔎 Search Stock / Company / Sector")
-search = st.text_input(
-    "Search",
-    placeholder="Example: Reliance, Infosys, HDFC Bank, Tata Motors, pharma, defence",
-    label_visibility="collapsed",
-)
+    st.success(
+        f"🕐 Last updated: {updated_time}"
+    )
 
-if search.strip():
-    news = search_news(search.strip())
-    st.subheader(f"📰 News related to {search.strip()}")
-else:
-    news = load_news()
-    st.subheader("📰 Major & Important News")
+    st.info(
+        f"Nifty 100: {len(symbols)} stocks | "
+        f"Calculated: {len(df)} stocks"
+    )
 
-if news.empty:
-    st.info("No major or important news found right now.")
-else:
-    for _, row in news.head(100).iterrows():
-        icon = "🔴" if row["Priority"] == "HIGH" else "🟠"
-        st.markdown(f"**{icon} {row['Priority']} • {row['Sector']}**")
-        st.markdown("**" + row["Published"].strftime("%d-%m-%Y %I:%M:%S %p IST") + "**")
-        st.markdown(f"#### {row['Headline']}")
-        if row["Summary"]:
-            st.write(row["Summary"][:1800])
-        st.caption("Source/feed: " + str(row["Source"]))
-        st.link_button("📖 Read original / full article", row["Link"])
-        st.divider()
+    if unavailable:
+        st.warning(
+            "Data unavailable for: "
+            + ", ".join(unavailable)
+        )
 
-st.download_button(
-    "⬇️ Download Current News",
-    news.to_csv(index=False).encode("utf-8"),
-    "market_news.csv",
-    "text/csv",
-)
+    st.subheader(
+        f"📋 Results — {len(df)} stocks"
+    )
 
-st.info(
-    "Coverage is designed to surface major and important developments across Indian stocks, "
-    "sectors, SEBI/RBI, corporate actions, the Indian economy and major global markets. "
-    "No public-feed app can guarantee every article because some publishers and regulatory "
-    "systems require direct or paid APIs. A headline is not treated as the reason for a "
-    "stock move unless the source itself provides that explanation."
-)
+    display_df = df.copy()
+
+    number_columns = [
+        "Price",
+        "1D Return %",
+        "1W Return %",
+        "1M Return %",
+        "21 EMA",
+        "50 EMA",
+        "200 EMA",
+        "52W High",
+        "52W Low",
+        "From 52W High %",
+        "From 52W Low %",
+        "From 21 EMA %"
+    ]
+
+    for col in number_columns:
+        display_df[col] = pd.to_numeric(
+            display_df[col],
+            errors="coerce"
+        ).round(2)
+
+    styled_df = (
+        display_df.style
+        .map(
+            colour_trend,
+            subset=["Trend"]
+        )
+        .format({
+            "Price": "{:.2f}",
+            "1D Return %": "{:.2f}",
+            "1W Return %": "{:.2f}",
+            "1M Return %": "{:.2f}",
+            "21 EMA": "{:.2f}",
+            "50 EMA": "{:.2f}",
+            "200 EMA": "{:.2f}",
+            "52W High": "{:.2f}",
+            "52W Low": "{:.2f}",
+            "From 52W High %": "{:.2f}",
+            "From 52W Low %": "{:.2f}",
+            "From 21 EMA %": "{:.2f}"
+        })
+    )
+
+    st.dataframe(
+        styled_df,
+        use_container_width=True,
+        height=650,
+        hide_index=True
+    )
+
+    csv_data = df.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    st.download_button(
+        label="⬇️ Download Results CSV",
+        data=csv_data,
+        file_name="nifty100_screener.csv",
+        mime="text/csv"
+    )
