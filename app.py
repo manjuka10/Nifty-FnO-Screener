@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 import streamlit as st
 import yfinance as yf
 
@@ -103,37 +104,21 @@ def get_nifty100():
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fno_stocks():
     """
-    Read the current Individual Securities F&O table directly from NSE's
-    'List of Underlyings and Information' page.
+    Read the current NSE 'List of Underlyings and Information' page.
 
-    No hard-coded F&O stock list is used.
+    We parse the actual HTML table instead of relying on pandas' inferred
+    column names. NSE's table is:
+        S. NO. | UNDERLYING | SYMBOL
+
+    The app therefore obtains the individual-security F&O universe directly
+    from NSE and never maintains a hard-coded F&O list.
     """
     session = nse_session()
     response = session.get(FNO_UNDERLYINGS_PAGE, timeout=25)
     response.raise_for_status()
 
-    # NSE's page contains a table with UNDERLYING and SYMBOL. pandas handles
-    # the HTML table directly; no guessed contract-master filename is used.
-    tables = pd.read_html(io.StringIO(response.text))
+    soup = BeautifulSoup(response.text, "html.parser")
 
-    target = None
-    for table in tables:
-        cols = {str(c).strip().upper() for c in table.columns}
-        if "SYMBOL" in cols and "UNDERLYING" in cols:
-            target = table.copy()
-            break
-
-    if target is None:
-        raise RuntimeError(
-            "Could not find NSE's 'UNDERLYING / SYMBOL' table. "
-            "NSE may have changed the page structure."
-        )
-
-    target.columns = [str(c).strip().upper() for c in target.columns]
-
-    # The page has index derivatives before the individual-stock section.
-    # Keep only rows that are stock names/symbols and exclude known indices.
-    symbols = []
     index_symbols = {
         "NIFTY",
         "BANKNIFTY",
@@ -143,20 +128,49 @@ def get_fno_stocks():
         "NIFTYFPI",
     }
 
-    for value in target["SYMBOL"].tolist():
-        symbol = clean_symbol(value)
-        if not symbol or symbol in index_symbols:
+    symbols = []
+
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
             continue
-        # NSE equity symbols can contain &, -, and other characters. Do not
-        # artificially restrict them to A-Z only.
-        symbols.append(symbol)
+
+        # Look for a table whose header explicitly contains SYMBOL.
+        header_text = " ".join(
+            cell.get_text(" ", strip=True).upper()
+            for cell in rows[0].find_all(["th", "td"])
+        )
+
+        if "SYMBOL" not in header_text or "UNDERLYING" not in header_text:
+            continue
+
+        for row in rows[1:]:
+            cells = row.find_all(["td", "th"])
+            if len(cells) < 3:
+                continue
+
+            values = [
+                cell.get_text(" ", strip=True)
+                for cell in cells
+            ]
+
+            # NSE's table is S.NO. / UNDERLYING / SYMBOL.
+            symbol = clean_symbol(values[-1])
+
+            if (
+                symbol
+                and symbol not in index_symbols
+                and symbol not in {"SYMBOL", "NAN", "NONE"}
+            ):
+                symbols.append(symbol)
 
     symbols = list(dict.fromkeys(symbols))
 
     if len(symbols) < 100:
         raise RuntimeError(
-            f"NSE F&O page returned only {len(symbols)} stock underlyings. "
-            "The app stopped rather than showing an incomplete F&O universe."
+            f"NSE returned only {len(symbols)} individual-security F&O "
+            "symbols. The app stopped instead of showing an incomplete "
+            "universe."
         )
 
     return symbols
@@ -437,9 +451,16 @@ def format_table(df):
             return "background-color:#f5b642;color:black;font-weight:700"
         return "background-color:#555;color:white"
 
-    return display.style.map(
-        trend_style,
-        subset=["Trend"],
+    return (
+        display.style
+        .map(trend_style, subset=["Trend"])
+        .set_properties(
+            subset=["Trend"],
+            **{
+                "text-align": "center",
+                "font-weight": "700",
+            },
+        )
     )
 
 
