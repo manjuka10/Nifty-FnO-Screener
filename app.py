@@ -1,5 +1,4 @@
 import io
-import gzip
 import re
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -18,191 +17,157 @@ st.set_page_config(
 
 IST = ZoneInfo("Asia/Kolkata")
 
+NSE_URL = "https://www.nseindia.com"
+NIFTY100_CSV = (
+    "https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv"
+)
+FNO_UNDERLYINGS_PAGE = (
+    "https://www.nseindia.com/products-services/"
+    "equity-derivatives-list-underlyings-information"
+)
+
 NSE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/139.0 Safari/537.36"
     ),
-    "Accept": "*/*",
-    "Accept-Language": "en-IN,en;q=0.9,en-US;q=0.8",
-    "Referer": "https://www.nseindia.com/",
-    "Connection": "keep-alive",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Referer": NSE_URL + "/",
 }
 
-NIFTY100_CSV = "https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv"
-
-# NSE publishes the F&O contract master every trading day. The app tries
-# today's file first and then recent dates so a holiday/weekend still works.
-FNO_CONTRACT_URLS = [
-    "https://nsearchives.nseindia.com/content/fo/NSE_FO_contract_{date}.csv.gz",
-    "https://nsearchives.nseindia.com/content/fo/NSE_FO_contract_{date}.CSV.GZ",
-    "https://nsearchives.nseindia.com/content/fo/NSE_FO_contract_{date}.csv",
-]
 
 def ist_now():
     return datetime.now(IST)
 
-def nse_session_open(dt):
+
+def market_open(dt):
     return dt.weekday() < 5 and time(9, 15) <= dt.time() <= time(15, 30)
 
+
 def nse_session():
-    s = requests.Session()
-    s.headers.update(NSE_HEADERS)
-    # Warm the NSE session first; this materially improves the chance that
-    # nsearchives/NSE endpoints accept the following request.
-    try:
-        s.get("https://www.nseindia.com/", timeout=12)
-    except Exception:
-        pass
-    return s
+    session = requests.Session()
+    session.headers.update(NSE_HEADERS)
+    session.get(NSE_URL + "/", timeout=15)
+    return session
+
+
+def clean_symbol(value):
+    value = str(value).strip().upper()
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+# ------------------------------------------------------------
+# DYNAMIC NSE UNIVERSES
+# ------------------------------------------------------------
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_nifty100_universe():
-    s = nse_session()
-    r = s.get(NIFTY100_CSV, timeout=20)
-    r.raise_for_status()
+def get_nifty100():
+    """Read the current Nifty 100 constituent file published by NSE."""
+    session = nse_session()
+    response = session.get(NIFTY100_CSV, timeout=20)
+    response.raise_for_status()
 
-    df = pd.read_csv(io.BytesIO(r.content))
+    df = pd.read_csv(io.BytesIO(response.content))
     df.columns = [str(c).strip() for c in df.columns]
 
     symbol_col = next(
-        (c for c in df.columns if c.upper() in {"SYMBOL", "SYMBOLS"}),
+        (c for c in df.columns if c.upper() == "SYMBOL"),
         None,
     )
     if symbol_col is None:
-        raise ValueError(f"NSE Nifty 100 CSV has no SYMBOL column: {list(df.columns)}")
+        raise RuntimeError(
+            f"NSE Nifty 100 CSV changed format. Columns: {list(df.columns)}"
+        )
 
-    symbols = (
-        df[symbol_col]
-        .astype(str)
-        .str.strip()
-        .str.upper()
-        .replace({"NAN": np.nan})
-        .dropna()
-        .tolist()
-    )
+    symbols = [
+        clean_symbol(x)
+        for x in df[symbol_col].dropna().tolist()
+        if clean_symbol(x)
+    ]
     symbols = list(dict.fromkeys(symbols))
 
+    # This prevents a broken/partial NSE response from silently becoming
+    # a smaller universe.
     if len(symbols) != 100:
-        raise ValueError(
-            f"NSE Nifty 100 source returned {len(symbols)} symbols, not 100. "
-            "The app will not substitute a hard-coded list."
+        raise RuntimeError(
+            f"NSE returned {len(symbols)} Nifty 100 constituents. "
+            "The app stopped rather than using an incomplete list."
         )
 
     return symbols
 
-def recent_trading_dates(days=10):
-    d = ist_now().date()
-    dates = []
-    for i in range(days):
-        dates.append((d - pd.Timedelta(days=i)).strftime("%d%m%Y"))
-    return dates
-
-def parse_contract_master(raw):
-    # NSE contract master is normally gzip-compressed CSV.
-    if raw[:2] == b"\x1f\x8b":
-        raw = gzip.decompress(raw)
-
-    df = pd.read_csv(io.BytesIO(raw), low_memory=False)
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # Normalize column lookup.
-    norm = {
-        re.sub(r"[^A-Z0-9]", "", c.upper()): c
-        for c in df.columns
-    }
-
-    instrument_col = next(
-        (norm[k] for k in ["INSTRUMENTTYPE", "INSTRUMENT"] if k in norm),
-        None,
-    )
-    symbol_col = next(
-        (
-            norm[k]
-            for k in [
-                "SYMBOL",
-                "UNDERLYINGSYMBOL",
-                "UNDERLYING",
-                "SYMBOLNAME",
-            ]
-            if k in norm
-        ),
-        None,
-    )
-
-    if symbol_col is None:
-        # Some contract masters identify the underlying inside IDENTIFIER.
-        ident_col = next(
-            (norm[k] for k in ["IDENTIFIER"] if k in norm),
-            None,
-        )
-        if ident_col is None:
-            raise ValueError(
-                f"Could not find an underlying symbol column. Columns: {list(df.columns)}"
-            )
-        # This is a last-resort parser for identifiers such as FUTSTKABC...
-        text = df[ident_col].astype(str)
-        stocks = []
-        for value in text:
-            m = re.search(r"(?:FUTSTK|OPTSTK)([A-Z0-9&.-]+)", value.upper())
-            if m:
-                stocks.append(m.group(1))
-        return sorted(set(stocks))
-
-    if instrument_col is not None:
-        inst = df[instrument_col].astype(str).str.upper().str.strip()
-        df = df[inst.isin(["FUTSTK", "OPTSTK"])].copy()
-
-    symbols = (
-        df[symbol_col]
-        .astype(str)
-        .str.strip()
-        .str.upper()
-        .replace({"NAN": np.nan})
-        .dropna()
-    )
-
-    symbols = [
-        s for s in dict.fromkeys(symbols.tolist())
-        if s and s not in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
-    ]
-
-    if not symbols:
-        raise ValueError("NSE F&O contract master contained no stock underlyings.")
-
-    return sorted(symbols)
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_fno_universe():
-    s = nse_session()
-    errors = []
+def get_fno_stocks():
+    """
+    Read the current Individual Securities F&O table directly from NSE's
+    'List of Underlyings and Information' page.
 
-    for date_text in recent_trading_dates(10):
-        for template in FNO_CONTRACT_URLS:
-            url = template.format(date=date_text)
-            try:
-                r = s.get(url, timeout=20)
-                if r.status_code != 200 or not r.content:
-                    continue
+    No hard-coded F&O stock list is used.
+    """
+    session = nse_session()
+    response = session.get(FNO_UNDERLYINGS_PAGE, timeout=25)
+    response.raise_for_status()
 
-                symbols = parse_contract_master(r.content)
+    # NSE's page contains a table with UNDERLYING and SYMBOL. pandas handles
+    # the HTML table directly; no guessed contract-master filename is used.
+    tables = pd.read_html(io.StringIO(response.text))
 
-                if len(symbols) < 100:
-                    continue
+    target = None
+    for table in tables:
+        cols = {str(c).strip().upper() for c in table.columns}
+        if "SYMBOL" in cols and "UNDERLYING" in cols:
+            target = table.copy()
+            break
 
-                return symbols
-            except Exception as exc:
-                errors.append(f"{url}: {exc}")
+    if target is None:
+        raise RuntimeError(
+            "Could not find NSE's 'UNDERLYING / SYMBOL' table. "
+            "NSE may have changed the page structure."
+        )
 
-    raise RuntimeError(
-        "Could not download the current NSE F&O contract master. "
-        "The app deliberately does NOT use a hard-coded F&O list, because "
-        "that could miss stocks after NSE changes the universe."
-    )
+    target.columns = [str(c).strip().upper() for c in target.columns]
 
-@st.cache_data(ttl=45, show_spinner=False)
-def download_daily(symbols):
+    # The page has index derivatives before the individual-stock section.
+    # Keep only rows that are stock names/symbols and exclude known indices.
+    symbols = []
+    index_symbols = {
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "NIFTYNXT50",
+        "NIFTYFPI",
+    }
+
+    for value in target["SYMBOL"].tolist():
+        symbol = clean_symbol(value)
+        if not symbol or symbol in index_symbols:
+            continue
+        # NSE equity symbols can contain &, -, and other characters. Do not
+        # artificially restrict them to A-Z only.
+        symbols.append(symbol)
+
+    symbols = list(dict.fromkeys(symbols))
+
+    if len(symbols) < 100:
+        raise RuntimeError(
+            f"NSE F&O page returned only {len(symbols)} stock underlyings. "
+            "The app stopped rather than showing an incomplete F&O universe."
+        )
+
+    return symbols
+
+
+# ------------------------------------------------------------
+# MARKET DATA
+# ------------------------------------------------------------
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_daily_data(symbols):
     return yf.download(
         [s + ".NS" for s in symbols],
         period="2y",
@@ -214,8 +179,9 @@ def download_daily(symbols):
         prepost=False,
     )
 
+
 @st.cache_data(ttl=20, show_spinner=False)
-def download_intraday(symbols):
+def get_intraday_data(symbols):
     return yf.download(
         [s + ".NS" for s in symbols],
         period="1d",
@@ -227,138 +193,121 @@ def download_intraday(symbols):
         prepost=False,
     )
 
+
 def ticker_frame(data, ticker):
     if data is None or data.empty:
         return pd.DataFrame()
 
     try:
         if isinstance(data.columns, pd.MultiIndex):
-            l0 = data.columns.get_level_values(0)
-            l1 = data.columns.get_level_values(1)
+            level0 = data.columns.get_level_values(0)
+            level1 = data.columns.get_level_values(1)
 
-            if ticker in l0:
-                df = data[ticker].copy()
-            elif ticker in l1:
-                df = data.xs(ticker, axis=1, level=1).copy()
+            if ticker in level0:
+                frame = data[ticker].copy()
+            elif ticker in level1:
+                frame = data.xs(ticker, axis=1, level=1).copy()
             else:
                 return pd.DataFrame()
         else:
-            df = data.copy()
+            frame = data.copy()
 
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [
-                x[-1] if isinstance(x, tuple) else x
-                for x in df.columns
+        if isinstance(frame.columns, pd.MultiIndex):
+            frame.columns = [
+                c[-1] if isinstance(c, tuple) else c
+                for c in frame.columns
             ]
 
-        if "Close" not in df.columns:
+        if "Close" not in frame.columns:
             return pd.DataFrame()
 
-        for c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+        for col in frame.columns:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
 
-        return df.dropna(how="all")
+        return frame.dropna(how="all")
     except Exception:
         return pd.DataFrame()
 
+
 def local_dates(index):
     idx = pd.DatetimeIndex(index)
+
     if idx.tz is not None:
         idx = idx.tz_convert(IST).tz_localize(None)
+
     return pd.Series(idx.date, index=index)
 
-def latest_today_price(intraday, today):
-    if intraday.empty or "Close" not in intraday.columns:
-        return np.nan
 
-    dates = local_dates(intraday.index)
-    today_df = intraday.loc[dates == today].dropna(subset=["Close"])
+def unavailable_row(symbol):
+    return {
+        "Stock": symbol,
+        "Live Price": np.nan,
+        "1D Return %": np.nan,
+        "1W Return %": np.nan,
+        "1M Return %": np.nan,
+        "21 EMA": np.nan,
+        "50 EMA": np.nan,
+        "200 EMA": np.nan,
+        "21 EMA vs Price %": np.nan,
+        "Trend": "Data unavailable",
+    }
 
-    if today_df.empty:
-        return np.nan
 
-    return float(today_df["Close"].iloc[-1])
+def calculate_stock(symbol, daily_all, intraday_all, dt):
+    daily = ticker_frame(daily_all, symbol + ".NS")
 
-def calculate(symbol, daily_all, intraday_all, dt):
-    ticker = symbol + ".NS"
-
-    daily = ticker_frame(daily_all, ticker)
-
-    # A stock remains in the universe even when its price data is unavailable.
     if daily.empty or "Close" not in daily.columns:
-        return {
-            "Stock": symbol,
-            "Live Price": np.nan,
-            "1D Return %": np.nan,
-            "1W Return %": np.nan,
-            "1M Return %": np.nan,
-            "21 EMA": np.nan,
-            "50 EMA": np.nan,
-            "200 EMA": np.nan,
-            "21 EMA vs Price %": np.nan,
-            "Trend": "Data unavailable",
-        }
+        return unavailable_row(symbol)
 
-    daily = daily.dropna(subset=["Close"])
+    daily = daily.dropna(subset=["Close"]).copy()
+
     if len(daily) < 2:
-        return {
-            "Stock": symbol,
-            "Live Price": np.nan,
-            "1D Return %": np.nan,
-            "1W Return %": np.nan,
-            "1M Return %": np.nan,
-            "21 EMA": np.nan,
-            "50 EMA": np.nan,
-            "200 EMA": np.nan,
-            "21 EMA vs Price %": np.nan,
-            "Trend": "Data unavailable",
-        }
+        return unavailable_row(symbol)
 
     today = dt.date()
     dates = local_dates(daily.index)
-    hist = daily.loc[dates < today].copy().dropna(subset=["Close"])
 
-    if hist.empty:
-        hist = daily.copy()
+    completed = daily.loc[dates < today].copy()
+    if completed.empty:
+        completed = daily.copy()
 
-    previous_close = float(hist["Close"].iloc[-1])
+    completed = completed.dropna(subset=["Close"])
 
-    intraday = ticker_frame(intraday_all, ticker)
-    today_price = latest_today_price(intraday, today)
+    if completed.empty:
+        return unavailable_row(symbol)
 
-    if nse_session_open(dt):
+    yesterday_close = float(completed["Close"].iloc[-1])
+
+    intraday = ticker_frame(intraday_all, symbol + ".NS")
+    today_price = np.nan
+
+    if not intraday.empty and "Close" in intraday.columns:
+        intra_dates = local_dates(intraday.index)
+        today_rows = intraday.loc[
+            intra_dates == today
+        ].dropna(subset=["Close"])
+
+        if not today_rows.empty:
+            today_price = float(today_rows["Close"].iloc[-1])
+
+    if np.isfinite(today_price) and today_price > 0:
         price = today_price
-        selected_date = today
-        day_base = previous_close
+        day_base = yesterday_close
+    elif not market_open(dt):
+        # Outside market hours, use today's last intraday bar when available.
+        # If the provider has no intraday data, use the latest daily close.
+        price = yesterday_close
+        day_base = (
+            float(completed["Close"].iloc[-2])
+            if len(completed) >= 2
+            else np.nan
+        )
     else:
-        # After the market, use the last intraday bar of today's session when
-        # available; this prevents Yahoo's daily candle from lagging by one day.
-        if np.isfinite(today_price):
-            price = today_price
-            selected_date = today
-            day_base = previous_close
-        else:
-            price = previous_close
-            selected_date = local_dates(hist.index).iloc[-1]
-            day_base = (
-                float(hist["Close"].iloc[-2])
-                if len(hist) >= 2
-                else np.nan
-            )
+        # Never call yesterday's close "Live Price" during market hours.
+        return unavailable_row(symbol)
 
     if not np.isfinite(price) or price <= 0:
-        return {
-            "Stock": symbol,
-            "Live Price": np.nan,
-            "1D Return %": np.nan,
-            "1W Return %": np.nan,
-            "1M Return %": np.nan,
-            "21 EMA": np.nan,
-            "50 EMA": np.nan,
-            "200 EMA": np.nan,
-            "21 EMA vs Price %": np.nan,
-            "Trend": "Data unavailable",
-        }
+        return unavailable_row(symbol)
 
     one_day = (
         (price / day_base - 1) * 100
@@ -366,28 +315,42 @@ def calculate(symbol, daily_all, intraday_all, dt):
         else np.nan
     )
 
-    week_base = float(hist["Close"].iloc[-5]) if len(hist) >= 5 else np.nan
+    week_base = (
+        float(completed["Close"].iloc[-5])
+        if len(completed) >= 5
+        else np.nan
+    )
     one_week = (
         (price / week_base - 1) * 100
         if np.isfinite(week_base) and week_base > 0
         else np.nan
     )
 
-    month_base = float(hist["Close"].iloc[-21]) if len(hist) >= 21 else np.nan
+    month_base = (
+        float(completed["Close"].iloc[-21])
+        if len(completed) >= 21
+        else np.nan
+    )
     one_month = (
         (price / month_base - 1) * 100
         if np.isfinite(month_base) and month_base > 0
         else np.nan
     )
 
-    # Current price is added as the latest observation. This makes all three
-    # EMAs and the EMA-distance respond to the live/current session price.
-    ema_series = hist["Close"].copy()
+    # Append current price as today's observation. Thus all EMAs and the
+    # EMA-distance respond to the current/live price.
+    ema_series = completed["Close"].copy()
     ema_series.loc[pd.Timestamp(dt)] = price
 
-    ema21 = float(ema_series.ewm(span=21, adjust=False).mean().iloc[-1])
-    ema50 = float(ema_series.ewm(span=50, adjust=False).mean().iloc[-1])
-    ema200 = float(ema_series.ewm(span=200, adjust=False).mean().iloc[-1])
+    ema21 = float(
+        ema_series.ewm(span=21, adjust=False).mean().iloc[-1]
+    )
+    ema50 = float(
+        ema_series.ewm(span=50, adjust=False).mean().iloc[-1]
+    )
+    ema200 = float(
+        ema_series.ewm(span=200, adjust=False).mean().iloc[-1]
+    )
 
     ema_diff = (
         (price / ema21 - 1) * 100
@@ -415,42 +378,54 @@ def calculate(symbol, daily_all, intraday_all, dt):
         "Trend": trend,
     }
 
+
 def scan(symbols):
     dt = ist_now()
-    daily = download_daily(symbols)
-    intraday = download_intraday(symbols)
+    daily = get_daily_data(symbols)
+    intraday = get_intraday_data(symbols)
 
-    rows = [calculate(s, daily, intraday, dt) for s in symbols]
+    rows = [
+        calculate_stock(symbol, daily, intraday, dt)
+        for symbol in symbols
+    ]
+
     result = pd.DataFrame(rows)
 
-    # Never lose a universe member because data for that stock failed.
-    result = result.set_index("Stock").reindex(symbols).reset_index()
+    # This is critical: every NSE constituent remains in the output even if
+    # its Yahoo price data is temporarily unavailable.
+    result = (
+        result.set_index("Stock")
+        .reindex(symbols)
+        .reset_index()
+    )
 
     return result, dt
 
-def style_table(df):
+
+def format_table(df):
     display = df.copy()
 
-    for c in ["Live Price", "21 EMA", "50 EMA", "200 EMA"]:
-        display[c] = display[c].map(
+    for col in ["Live Price", "21 EMA", "50 EMA", "200 EMA"]:
+        display[col] = display[col].map(
             lambda x: f"{x:,.2f}" if pd.notna(x) else "—"
         )
 
-    for c in ["1D Return %", "1W Return %", "1M Return %", "21 EMA vs Price %"]:
-        display[c] = display[c].map(
+    for col in [
+        "1D Return %",
+        "1W Return %",
+        "1M Return %",
+        "21 EMA vs Price %",
+    ]:
+        display[col] = display[col].map(
             lambda x: f"{x:+.2f}%" if pd.notna(x) else "—"
         )
 
-    def trend_text(x):
-        if x == "Bullish":
-            return "🟢 Bullish"
-        if x == "Bearish":
-            return "🔴 Bearish"
-        if x == "Neutral":
-            return "🟡 Neutral"
-        return "⚪ Data unavailable"
-
-    display["Trend"] = display["Trend"].map(trend_text)
+    display["Trend"] = display["Trend"].replace({
+        "Bullish": "🟢 Bullish",
+        "Neutral": "🟡 Neutral",
+        "Bearish": "🔴 Bearish",
+        "Data unavailable": "⚪ Data unavailable",
+    })
 
     def trend_style(value):
         value = str(value)
@@ -462,16 +437,22 @@ def style_table(df):
             return "background-color:#f5b642;color:black;font-weight:700"
         return "background-color:#555;color:white"
 
-    return display.style.map(trend_style, subset=["Trend"])
+    return display.style.map(
+        trend_style,
+        subset=["Trend"],
+    )
 
-# -------------------- UI --------------------
+
+# ------------------------------------------------------------
+# APP
+# ------------------------------------------------------------
 
 st.title("📊 My Stock Screener")
-st.subheader("NSE Universe Technical Screener")
+st.subheader("NSE Dynamic Universe Technical Screener")
 
 st.caption(
-    "Universe lists are obtained from NSE. No hard-coded Nifty 100 or F&O "
-    "stock list is used. Price data is from Yahoo Finance."
+    "Nifty 100 and F&O universes are read directly from NSE. "
+    "No hard-coded stock list is used."
 )
 
 universe = st.selectbox(
@@ -481,27 +462,45 @@ universe = st.selectbox(
 
 try:
     if universe == "Nifty 100":
-        symbols = get_nifty100_universe()
-        source_text = "NSE Nifty 100"
+        symbols = get_nifty100()
+        source = "NSE Nifty 100"
     else:
-        symbols = get_fno_universe()
-        source_text = "NSE current stock F&O contract master"
+        symbols = get_fno_stocks()
+        source = "NSE Individual Securities F&O"
 except Exception as exc:
-    st.error(f"Could not load the current NSE universe: {exc}")
+    st.error(
+        "NSE universe could not be loaded. "
+        "The app has intentionally stopped instead of showing an incomplete list."
+    )
+    st.code(str(exc))
     st.stop()
 
-st.caption(f"{source_text} • {len(symbols)} stocks")
+st.caption(f"{source} • {len(symbols)} stocks")
 
-c1, c2 = st.columns(2)
-with c1:
-    scan_button = st.button("🔍 Scan", type="primary", use_container_width=True)
-with c2:
-    refresh_button = st.button("🔄 Refresh Now", use_container_width=True)
+col1, col2 = st.columns(2)
 
-if scan_button or refresh_button or "result" not in st.session_state:
+with col1:
+    scan_button = st.button(
+        "🔍 Scan",
+        type="primary",
+        use_container_width=True,
+    )
+
+with col2:
+    refresh_button = st.button(
+        "🔄 Refresh Now",
+        use_container_width=True,
+    )
+
+if (
+    scan_button
+    or refresh_button
+    or "result" not in st.session_state
+    or st.session_state.get("universe") != universe
+):
     if refresh_button:
-        download_intraday.clear()
-        download_daily.clear()
+        get_intraday_data.clear()
+        get_daily_data.clear()
 
     with st.spinner(f"Loading {len(symbols)} stocks..."):
         result, updated = scan(symbols)
@@ -523,43 +522,46 @@ if not result.empty:
 
     if unavailable:
         st.info(
-            f"{len(result)} stocks in the NSE universe are displayed. "
+            f"All {len(result)} NSE universe stocks are shown. "
             f"{unavailable} currently have unavailable price data; "
-            "they have NOT been removed from the universe."
+            "they were not removed."
         )
 
     st.dataframe(
-        style_table(result),
+        format_table(result),
         use_container_width=True,
         hide_index=True,
         height=680,
     )
 
+
 @st.fragment(run_every="5m")
-def automatic_refresh():
-    # Refresh only price data every 5 minutes. Universe membership is refreshed
-    # hourly, which is enough to catch an NSE constituent change without
-    # repeatedly hammering NSE.
-    download_intraday.clear()
+def auto_refresh():
+    # Refresh price data every 5 minutes.
+    # Universe lists are cached for one hour and therefore automatically
+    # pick up an NSE constituent change within the cache window.
+    get_intraday_data.clear()
 
     try:
         if universe == "Nifty 100":
-            current_symbols = get_nifty100_universe()
+            current_symbols = get_nifty100()
         else:
-            current_symbols = get_fno_universe()
+            current_symbols = get_fno_stocks()
 
         current_result, current_updated = scan(current_symbols)
 
         st.session_state.result = current_result
         st.session_state.updated = current_updated
+        st.session_state.universe = universe
 
         st.dataframe(
-            style_table(current_result),
+            format_table(current_result),
             use_container_width=True,
             hide_index=True,
             height=680,
         )
     except Exception as exc:
-        st.warning(f"Automatic refresh could not complete: {exc}")
+        st.warning(f"Automatic refresh failed: {exc}")
 
-automatic_refresh()
+
+auto_refresh()
