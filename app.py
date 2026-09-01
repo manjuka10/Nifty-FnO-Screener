@@ -442,22 +442,49 @@ def format_table(df):
             lambda x: f"{x:+.2f}%" if pd.notna(x) else "—"
         )
 
+    # Trend colouring ONLY:
+    # light green = Bullish, light yellow = Neutral,
+    # light red = Bearish, light grey = no data.
     display["Trend"] = display["Trend"].replace({
-        "Bullish": "🟢 Bullish",
-        "Neutral": "🟡 Neutral",
-        "Bearish": "🔴 Bearish",
-        "Data unavailable": "⚪ Data unavailable",
+        "Bullish": "↑ Bullish",
+        "Neutral": "→ Neutral",
+        "Bearish": "↓ Bearish",
+        "Data unavailable": "— N/A",
     })
 
     def trend_style(value):
         value = str(value)
+
         if "Bullish" in value:
-            return "background-color:#198754;color:white;font-weight:700"
-        if "Bearish" in value:
-            return "background-color:#dc3545;color:white;font-weight:700"
+            return (
+                "background-color:#D9F2DD;"
+                "color:#16823A;"
+                "font-weight:700;"
+                "text-align:center;"
+            )
+
         if "Neutral" in value:
-            return "background-color:#f5b642;color:black;font-weight:700"
-        return "background-color:#555;color:white"
+            return (
+                "background-color:#FFF2CC;"
+                "color:#C47A00;"
+                "font-weight:700;"
+                "text-align:center;"
+            )
+
+        if "Bearish" in value:
+            return (
+                "background-color:#FADBDD;"
+                "color:#C62828;"
+                "font-weight:700;"
+                "text-align:center;"
+            )
+
+        return (
+            "background-color:#E8E8E8;"
+            "color:#666666;"
+            "font-weight:700;"
+            "text-align:center;"
+        )
 
     return (
         display.style
