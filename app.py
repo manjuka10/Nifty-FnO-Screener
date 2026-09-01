@@ -141,19 +141,57 @@ def calculate(symbol, daily_all, intraday_all, dt):
         idates = local_dates(intraday.index)
         today_intraday = intraday.loc[idates == today].dropna(subset=["Close"])
 
+    latest_intraday_date = None
+
     if market_open(dt):
-        # Never show an old close as a live price during market hours.
+        # During market hours use today's latest available 5-minute price.
         if today_intraday.empty:
             return None
         price = float(today_intraday["Close"].iloc[-1])
     else:
-        # Outside market hours, the latest completed daily close is used.
-        price = previous_close
+        # After market close the daily feed may still lag one session.
+        # Use the newest intraday session close when available.
+        latest_intraday = pd.DataFrame()
+
+        if not intraday.empty and "Close" in intraday.columns:
+            idates = local_dates(intraday.index)
+            valid_idates = idates.dropna()
+            if not valid_idates.empty:
+                latest_intraday_date = valid_idates.max()
+                latest_intraday = intraday.loc[
+                    idates == latest_intraday_date
+                ].dropna(subset=["Close"])
+
+        hist_date = local_dates(hist.index).iloc[-1]
+        if (
+            not latest_intraday.empty
+            and latest_intraday_date is not None
+            and latest_intraday_date >= hist_date
+        ):
+            price = float(latest_intraday["Close"].iloc[-1])
+        else:
+            price = previous_close
 
     if not np.isfinite(price) or price <= 0:
         return None
 
-    one_day = (price / previous_close - 1) * 100
+    # 1D return uses live price vs previous close during market hours.
+    # After market, if price is already the latest daily session, compare
+    # against the prior completed trading-session close.
+    if market_open(dt):
+        day_base = previous_close
+    else:
+        hist_last_date = local_dates(hist.index).iloc[-1]
+        selected_date = latest_intraday_date or hist_last_date
+        if selected_date == hist_last_date and len(hist) >= 2:
+            day_base = float(hist["Close"].iloc[-2])
+        else:
+            day_base = previous_close
+
+    one_day = (
+        (price / day_base - 1) * 100
+        if np.isfinite(day_base) and day_base > 0 else np.nan
+    )
 
     week_base = float(hist["Close"].iloc[-5])
     one_week = (price / week_base - 1) * 100 if week_base > 0 else np.nan
@@ -220,8 +258,19 @@ def show_table(df):
             lambda x: f"{x:+.2f}%" if pd.notna(x) else "—"
         )
 
+    def colour_trend(value):
+        if value == "Bullish":
+            return "background-color: #198754; color: white; font-weight: bold;"
+        if value == "Neutral":
+            return "background-color: #F5B642; color: black; font-weight: bold;"
+        if value == "Bearish":
+            return "background-color: #DC3545; color: white; font-weight: bold;"
+        return ""
+
+    styled = display.style.map(colour_trend, subset=["Trend"])
+
     st.dataframe(
-        display,
+        styled,
         use_container_width=True,
         hide_index=True,
         height=650,
