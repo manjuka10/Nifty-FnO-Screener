@@ -6,7 +6,6 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 import streamlit as st
 import yfinance as yf
 
@@ -104,76 +103,85 @@ def get_nifty100():
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fno_stocks():
     """
-    Read the current NSE 'List of Underlyings and Information' page.
+    Get the current individual-stock F&O universe from NSE's JSON API.
 
-    We parse the actual HTML table instead of relying on pandas' inferred
-    column names. NSE's table is:
-        S. NO. | UNDERLYING | SYMBOL
+    NSE's current website itself uses /api/underlying-information. The API
+    response contains:
+        data -> UnderlyingList
+        data -> IndexList
 
-    The app therefore obtains the individual-security F&O universe directly
-    from NSE and never maintains a hard-coded F&O list.
+    We use UnderlyingList only, so indices are never mixed into the F&O
+    stock universe.
     """
-    session = nse_session()
-    response = session.get(FNO_UNDERLYINGS_PAGE, timeout=25)
-    response.raise_for_status()
+    api_url = "https://www.nseindia.com/api/underlying-information"
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/139.0 Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Referer": "https://www.nseindia.com/option-chain",
+        "Connection": "keep-alive",
+    })
 
-    index_symbols = {
-        "NIFTY",
-        "BANKNIFTY",
-        "FINNIFTY",
-        "MIDCPNIFTY",
-        "NIFTYNXT50",
-        "NIFTYFPI",
-    }
+    # NSE expects a browser-like session before accepting the JSON API.
+    bootstrap_urls = [
+        "https://www.nseindia.com/option-chain",
+        "https://www.nseindia.com/",
+    ]
 
-    symbols = []
+    last_error = None
 
-    for table in soup.find_all("table"):
-        rows = table.find_all("tr")
-        if not rows:
-            continue
+    for bootstrap in bootstrap_urls:
+        try:
+            session.get(bootstrap, timeout=15)
+            response = session.get(api_url, timeout=20)
 
-        # Look for a table whose header explicitly contains SYMBOL.
-        header_text = " ".join(
-            cell.get_text(" ", strip=True).upper()
-            for cell in rows[0].find_all(["th", "td"])
-        )
+            if response.status_code == 200:
+                payload = response.json()
+                data = payload.get("data", {})
 
-        if "SYMBOL" not in header_text or "UNDERLYING" not in header_text:
-            continue
+                underlying_list = data.get("UnderlyingList", [])
 
-        for row in rows[1:]:
-            cells = row.find_all(["td", "th"])
-            if len(cells) < 3:
-                continue
+                symbols = []
+                for item in underlying_list:
+                    if not isinstance(item, dict):
+                        continue
 
-            values = [
-                cell.get_text(" ", strip=True)
-                for cell in cells
-            ]
+                    symbol = clean_symbol(
+                        item.get("symbol", "")
+                    )
 
-            # NSE's table is S.NO. / UNDERLYING / SYMBOL.
-            symbol = clean_symbol(values[-1])
+                    if symbol:
+                        symbols.append(symbol)
 
-            if (
-                symbol
-                and symbol not in index_symbols
-                and symbol not in {"SYMBOL", "NAN", "NONE"}
-            ):
-                symbols.append(symbol)
+                symbols = list(dict.fromkeys(symbols))
 
-    symbols = list(dict.fromkeys(symbols))
+                if len(symbols) < 100:
+                    raise RuntimeError(
+                        f"NSE API returned only {len(symbols)} "
+                        "individual-stock F&O symbols."
+                    )
 
-    if len(symbols) < 100:
-        raise RuntimeError(
-            f"NSE returned only {len(symbols)} individual-security F&O "
-            "symbols. The app stopped instead of showing an incomplete "
-            "universe."
-        )
+                return symbols
 
-    return symbols
+            last_error = (
+                f"NSE API HTTP {response.status_code}: "
+                f"{response.text[:300]}"
+            )
+
+        except Exception as exc:
+            last_error = str(exc)
+
+    raise RuntimeError(
+        "NSE F&O universe API could not be read. "
+        "The app will not use a hard-coded fallback list. "
+        f"Last error: {last_error}"
+    )
 
 
 # ------------------------------------------------------------
