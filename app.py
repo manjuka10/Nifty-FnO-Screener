@@ -11,20 +11,20 @@ IST = ZoneInfo("Asia/Kolkata")
 
 # Nifty 100 symbols (Yahoo/NSE symbols, without .NS)
 NIFTY_100 = [
-    "ABB","ADANIENSOL","ADANIENT","ADANIGREEN","ADANIPORTS","ADANIPOWER",
-    "AMBUJACEM","APOLLOHOSP","ASIANPAINT","AXISBANK","BAJAJ-AUTO",
-    "BAJAJFINSV","BAJFINANCE","BEL","BHARTIARTL","BPCL","BRITANNIA","CIPLA",
-    "COALINDIA","COLPAL","DABUR","DIVISLAB","DLF","DRREDDY","EICHERMOT",
-    "ETERNAL","GAIL","GODREJCP","GRASIM","HCLTECH","HDFCBANK","HDFCLIFE",
-    "HEROMOTOCO","HINDALCO","HINDPETRO","HINDUNILVR","ICICIBANK","ICICIGI",
-    "ICICIPRULI","INDHOTEL","INDUSINDBK","INDUSTOWER","INFY","IOC","IRCTC",
-    "ITC","JINDALSTEL","JSWENERGY","JSWSTEEL","KOTAKBANK","LT","LTIM",
-    "M&M","MARICO","MAXHEALTH","MOTHERSON","MPHASIS","MUTHOOTFIN","NAUKRI",
-    "NESTLEIND","NHPC","NTPC","ONGC","PAGEIND","PIDILITIND","PFC","POWERGRID",
-    "RECLTD","RELIANCE","SAIL","SBILIFE","SBIN","SHREECEM","SHRIRAMFIN",
-    "SIEMENS","SRF","SUNPHARMA","TATACONSUM","TATAMOTORS","TATASTEEL","TCS",
-    "TECHM","TITAN","TORNTPHARM","TRENT","TVSMOTOR","ULTRACEMCO","UPL",
-    "VEDL","WIPRO","ZYDUSLIFE","INDIGO","HINDZINC","ADANIENSOL","CANBK"
+    "INDHOTEL","GAIL","PIDILITIND","SUNPHARMA","MOTHERSON","CGPOWER","NESTLEIND",
+    "BOSCHLTD","AXISBANK","BAJAJHLDNG","DIVISLAB","GRASIM","TCS","ICICIBANK",
+    "SHRIRAMFIN","HDFCAMC","RECLTD","WIPRO","BAJAJ-AUTO","DMART","ASIANPAINT",
+    "ABB","DLF","BPCL","IOC","UNIONBANK","INDIGO","MARUTI","JIOFIN","SBIN",
+    "JINDALSTEL","TMCV","BAJAJFINSV","TVSMOTOR","APOLLOHOSP","BEL","TORNTPHARM",
+    "COALINDIA","ETERNAL","LT","ONGC","CHOLAFIN","HCLTECH","TATACONSUM","ENRIN",
+    "TRENT","IRFC","RELIANCE","TECHM","NTPC","HDFCLIFE","INFY","POWERGRID","CIPLA",
+    "KOTAKBANK","PNB","BRITANNIA","CANBK","TATASTEEL","SBILIFE","ULTRACEMCO","HAL",
+    "TITAN","EICHERMOT","UNITDSPR","BANKBARODA","TATAPOWER","SOLARINDS","SIEMENS",
+    "GODREJCP","M&M","HDFCBANK","CUMMINSIND","DRREDDY","JSWSTEEL","TATACAP",
+    "HINDALCO","BAJFINANCE","HINDUNILVR","ZYDUSLIFE","AMBUJACEM","HYUNDAI","LTM",
+    "MAZDOCK","VBL","TMPV","SHREECEM","VEDL","MUTHOOTFIN","BHARTIARTL","ITC",
+    "HINDZINC","PFC","LODHA","ADANIPORTS","ADANIPOWER","ADANIGREEN","ADANIENT",
+    "ADANIENSOL","ICICIGI"
 ]
 
 # Broad F&O universe fallback. This is deliberately separate from Nifty 100.
@@ -52,7 +52,7 @@ def now_ist():
 def market_open(dt):
     return dt.weekday() < 5 and time(9, 15) <= dt.time() <= time(15, 30)
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def download_daily(symbols):
     return yf.download(
         [s + ".NS" for s in symbols],
@@ -65,7 +65,7 @@ def download_daily(symbols):
         prepost=False,
     )
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def download_intraday(symbols):
     return yf.download(
         [s + ".NS" for s in symbols],
@@ -77,6 +77,18 @@ def download_intraday(symbols):
         threads=True,
         prepost=False,
     )
+
+@st.cache_data(ttl=15, show_spinner=False)
+def download_single_intraday(symbol):
+    try:
+        return yf.Ticker(symbol + ".NS").history(
+            period="5d",
+            interval="5m",
+            auto_adjust=False,
+            prepost=False,
+        )
+    except Exception:
+        return pd.DataFrame()
 
 def ticker_frame(data, ticker):
     if data is None or data.empty:
@@ -114,92 +126,157 @@ def local_dates(index):
     return pd.Series(idx.date, index=index)
 
 def calculate(symbol, daily_all, intraday_all, dt):
-    daily = ticker_frame(daily_all, symbol + ".NS")
+    ticker = symbol + ".NS"
+
+    daily = ticker_frame(daily_all, ticker)
     if daily.empty or "Close" not in daily.columns:
         return None
 
-    daily = daily.dropna(subset=["Close"])
+    daily = daily.dropna(subset=["Close"]).copy()
     if len(daily) < 200:
         return None
 
     today = dt.date()
     dates = local_dates(daily.index)
-    hist = daily.loc[dates < today].copy()
-    if len(hist) < 200:
-        hist = daily.copy()
 
-    hist = hist.dropna(subset=["Close"])
+    # Use all completed daily history for EMA calculation.
+    hist = daily.loc[dates < today].copy().dropna(subset=["Close"])
     if len(hist) < 200:
         return None
 
     previous_close = float(hist["Close"].iloc[-1])
+    previous_date = dates.loc[hist.index].iloc[-1]
 
-    intraday = ticker_frame(intraday_all, symbol + ".NS")
+    # Today's intraday bars.
+    intraday = ticker_frame(intraday_all, ticker)
     today_intraday = pd.DataFrame()
+    latest_intraday_date = None
+    latest_intraday = pd.DataFrame()
 
     if not intraday.empty and "Close" in intraday.columns:
         idates = local_dates(intraday.index)
-        today_intraday = intraday.loc[idates == today].dropna(subset=["Close"])
+        valid = idates.dropna()
+        if not valid.empty:
+            latest_intraday_date = valid.max()
+            latest_intraday = intraday.loc[
+                idates == latest_intraday_date
+            ].dropna(subset=["Close"])
 
-    latest_intraday_date = None
+        today_intraday = intraday.loc[
+            idates == today
+        ].dropna(subset=["Close"])
 
+    # Batch downloads can occasionally omit one NSE symbol. If today's
+    # bars are missing, make one targeted request for that stock.
+    if today_intraday.empty:
+        single = download_single_intraday(symbol)
+        if not single.empty and "Close" in single.columns:
+            single = single.dropna(subset=["Close"])
+            if not single.empty:
+                sdates = local_dates(single.index)
+                today_intraday = single.loc[
+                    sdates == today
+                ].dropna(subset=["Close"])
+
+    # --------------------------------------------------------
+    # CURRENT PRICE
+    # --------------------------------------------------------
+    # Market open: today's latest intraday bar is mandatory.
     if market_open(dt):
-        # During market hours use today's latest available 5-minute price.
         if today_intraday.empty:
             return None
         price = float(today_intraday["Close"].iloc[-1])
+        price_date = today
+        day_base = previous_close
+
     else:
-        # After market close the daily feed may still lag one session.
-        # Use the newest intraday session close when available.
-        latest_intraday = pd.DataFrame()
+        # After market close, first prefer today's intraday close.
+        # This prevents Yahoo's daily endpoint from leaving us on yesterday.
+        if not today_intraday.empty:
+            price = float(today_intraday["Close"].iloc[-1])
+            price_date = today
+            day_base = previous_close
 
-        if not intraday.empty and "Close" in intraday.columns:
-            idates = local_dates(intraday.index)
-            valid_idates = idates.dropna()
-            if not valid_idates.empty:
-                latest_intraday_date = valid_idates.max()
-                latest_intraday = intraday.loc[
-                    idates == latest_intraday_date
-                ].dropna(subset=["Close"])
+        # If today's 5m bars are unavailable, check whether Yahoo's daily
+        # endpoint has already produced today's daily candle.
+        elif not daily.empty and dates.max() == today:
+            today_daily = daily.loc[dates == today].dropna(subset=["Close"])
+            if not today_daily.empty:
+                price = float(today_daily["Close"].iloc[-1])
+                price_date = today
+                day_base = previous_close
 
-        hist_date = local_dates(hist.index).iloc[-1]
-        if (
+        # Finally use the latest intraday session returned by Yahoo.
+        elif (
             not latest_intraday.empty
             and latest_intraday_date is not None
-            and latest_intraday_date >= hist_date
+            and latest_intraday_date > previous_date
         ):
             price = float(latest_intraday["Close"].iloc[-1])
+            price_date = latest_intraday_date
+            day_base = previous_close
+
         else:
-            price = previous_close
+            # Last targeted fallback: ask Yahoo for the last two daily sessions.
+            # This catches the common case where the bulk 1y response is one
+            # session behind even though a direct ticker request has today's close.
+            try:
+                recent = yf.Ticker(ticker).history(
+                    period="5d",
+                    interval="1d",
+                    auto_adjust=False,
+                )
+                if not recent.empty and "Close" in recent.columns:
+                    recent = recent.dropna(subset=["Close"])
+                    rdates = local_dates(recent.index)
+                    if not recent.empty and rdates.max() == today:
+                        price = float(recent["Close"].iloc[-1])
+                        price_date = today
+                        day_base = previous_close
+                    else:
+                        price = previous_close
+                        price_date = previous_date
+                        day_base = (
+                            float(hist["Close"].iloc[-2])
+                            if len(hist) >= 2 else np.nan
+                        )
+                else:
+                    price = previous_close
+                    price_date = previous_date
+                    day_base = (
+                        float(hist["Close"].iloc[-2])
+                        if len(hist) >= 2 else np.nan
+                    )
+            except Exception:
+                price = previous_close
+                price_date = previous_date
+                day_base = (
+                    float(hist["Close"].iloc[-2])
+                    if len(hist) >= 2 else np.nan
+                )
 
     if not np.isfinite(price) or price <= 0:
         return None
-
-    # 1D return uses live price vs previous close during market hours.
-    # After market, if price is already the latest daily session, compare
-    # against the prior completed trading-session close.
-    if market_open(dt):
-        day_base = previous_close
-    else:
-        hist_last_date = local_dates(hist.index).iloc[-1]
-        selected_date = latest_intraday_date or hist_last_date
-        if selected_date == hist_last_date and len(hist) >= 2:
-            day_base = float(hist["Close"].iloc[-2])
-        else:
-            day_base = previous_close
 
     one_day = (
         (price / day_base - 1) * 100
         if np.isfinite(day_base) and day_base > 0 else np.nan
     )
 
+    # Returns use the selected current/session price.
     week_base = float(hist["Close"].iloc[-5])
-    one_week = (price / week_base - 1) * 100 if week_base > 0 else np.nan
-
     month_base = float(hist["Close"].iloc[-21])
-    one_month = (price / month_base - 1) * 100 if month_base > 0 else np.nan
 
-    # Add current price as the latest observation so EMAs move with price.
+    one_week = (
+        (price / week_base - 1) * 100
+        if week_base > 0 else np.nan
+    )
+    one_month = (
+        (price / month_base - 1) * 100
+        if month_base > 0 else np.nan
+    )
+
+    # Add selected current/session price as the latest observation.
     ema_data = hist["Close"].copy()
     ema_data.loc[pd.Timestamp(dt)] = price
 
@@ -207,14 +284,17 @@ def calculate(symbol, daily_all, intraday_all, dt):
     ema50 = float(ema_data.ewm(span=50, adjust=False).mean().iloc[-1])
     ema200 = float(ema_data.ewm(span=200, adjust=False).mean().iloc[-1])
 
-    ema_diff = (price / ema21 - 1) * 100 if ema21 > 0 else np.nan
+    ema_diff = (
+        (price / ema21 - 1) * 100
+        if ema21 > 0 else np.nan
+    )
 
     if price > ema21 and ema21 > ema50 and ema50 > ema200:
-        trend = "Bullish"
+        trend = "🟢 Bullish"
     elif price < ema21 and ema21 < ema50 and ema50 < ema200:
-        trend = "Bearish"
+        trend = "🔴 Bearish"
     else:
-        trend = "Neutral"
+        trend = "🟡 Neutral"
 
     return {
         "Stock": symbol,
@@ -258,19 +338,10 @@ def show_table(df):
             lambda x: f"{x:+.2f}%" if pd.notna(x) else "—"
         )
 
-    def colour_trend(value):
-        if value == "Bullish":
-            return "background-color: #198754; color: white; font-weight: bold;"
-        if value == "Neutral":
-            return "background-color: #F5B642; color: black; font-weight: bold;"
-        if value == "Bearish":
-            return "background-color: #DC3545; color: white; font-weight: bold;"
-        return ""
-
-    styled = display.style.map(colour_trend, subset=["Trend"])
+    st.caption("Trend: 🟢 Bullish   🟡 Neutral   🔴 Bearish")
 
     st.dataframe(
-        styled,
+        display,
         use_container_width=True,
         hide_index=True,
         height=650,
@@ -280,7 +351,7 @@ st.title("📊 My Stock Screener")
 st.subheader("Indian Stock Market Technical Screener")
 
 st.caption(
-    "Live Price, 1D/1W/1M returns, 21/50/200 EMA, "
+    "Current/live-session price, 1D/1W/1M returns, 21/50/200 EMA, "
     "21 EMA vs Price and Trend. Auto-refreshes every 5 minutes."
 )
 
