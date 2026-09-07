@@ -583,8 +583,12 @@ if not result.empty:
             "they were not removed."
         )
 
+    filtered_result = result[
+        result["21 EMA vs Price %"].abs() >= 5
+    ].copy()
+
     st.dataframe(
-        format_table(result),
+        format_table(filtered_result),
         use_container_width=True,
         hide_index=True,
         height=680,
@@ -610,8 +614,12 @@ def auto_refresh():
         st.session_state.updated = current_updated
         st.session_state.universe = universe
 
+        filtered_current_result = current_result[
+            current_result["21 EMA vs Price %"].abs() >= 5
+        ].copy()
+
         st.dataframe(
-            format_table(current_result),
+            format_table(filtered_current_result),
             use_container_width=True,
             hide_index=True,
             height=680,
