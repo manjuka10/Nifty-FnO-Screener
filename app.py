@@ -629,30 +629,6 @@ def auto_refresh():
         st.session_state.updated = current_updated
         st.session_state.universe = universe
 
-        filtered_current_result = current_result[
-            current_result["21 EMA vs Price %"].abs() >= 5
-        ].copy()
-
-        st.dataframe(
-            format_table(filtered_current_result),
-            column_config={
-                "1D Return %": st.column_config.NumberColumn(
-                    "1D Return %", format="%.2f%%"
-                ),
-                "1W Return %": st.column_config.NumberColumn(
-                    "1W Return %", format="%.2f%%"
-                ),
-                "1M Return %": st.column_config.NumberColumn(
-                    "1M Return %", format="%.2f%%"
-                ),
-                "21 EMA vs Price %": st.column_config.NumberColumn(
-                    "21 EMA vs Price %", format="%.2f%%"
-                ),
-            },
-            use_container_width=True,
-            hide_index=True,
-            height=680,
-        )
     except Exception as exc:
         st.warning(f"Automatic refresh failed: {exc}")
 
