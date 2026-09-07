@@ -432,15 +432,16 @@ def format_table(df):
             lambda x: f"{x:,.2f}" if pd.notna(x) else "—"
         )
 
+    # Keep percentage columns numeric so Streamlit sorts them
+    # numerically (not alphabetically). Formatting is handled by
+    # st.column_config.NumberColumn below.
     for col in [
         "1D Return %",
         "1W Return %",
         "1M Return %",
         "21 EMA vs Price %",
     ]:
-        display[col] = display[col].map(
-            lambda x: f"{x:+.2f}%" if pd.notna(x) else "—"
-        )
+        display[col] = pd.to_numeric(display[col], errors="coerce")
 
     # Trend colouring ONLY:
     # light green = Bullish, light yellow = Neutral,
@@ -589,6 +590,20 @@ if not result.empty:
 
     st.dataframe(
         format_table(filtered_result),
+        column_config={
+            "1D Return %": st.column_config.NumberColumn(
+                "1D Return %", format="+%.2f%%"
+            ),
+            "1W Return %": st.column_config.NumberColumn(
+                "1W Return %", format="+%.2f%%"
+            ),
+            "1M Return %": st.column_config.NumberColumn(
+                "1M Return %", format="+%.2f%%"
+            ),
+            "21 EMA vs Price %": st.column_config.NumberColumn(
+                "21 EMA vs Price %", format="+%.2f%%"
+            ),
+        },
         use_container_width=True,
         hide_index=True,
         height=680,
@@ -620,6 +635,20 @@ def auto_refresh():
 
         st.dataframe(
             format_table(filtered_current_result),
+            column_config={
+                "1D Return %": st.column_config.NumberColumn(
+                    "1D Return %", format="+%.2f%%"
+                ),
+                "1W Return %": st.column_config.NumberColumn(
+                    "1W Return %", format="+%.2f%%"
+                ),
+                "1M Return %": st.column_config.NumberColumn(
+                    "1M Return %", format="+%.2f%%"
+                ),
+                "21 EMA vs Price %": st.column_config.NumberColumn(
+                    "21 EMA vs Price %", format="+%.2f%%"
+                ),
+            },
             use_container_width=True,
             hide_index=True,
             height=680,
